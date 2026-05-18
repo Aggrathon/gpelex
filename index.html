@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>GPeleX in Browser</title>
+        <style>
+            :root {
+                --primary-color: #008b8b;
+                --secondary-color: slategray;
+                --background-color: #e6f7e6;
+                --button-color: #ccedab;
+                --button-hover-color: #afe67f;
+                --error-color: #8b0000;
+            }
+            body {
+                font-family: Arial, sans-serif;
+                background-color: var(--background-color);
+                padding: 20px;
+                display: flex;
+                justify-content: center;
+                line-height: 1.5;
+            }
+            .container {
+                max-width: 800px;
+                width: 100%;
+            }
+            h1 {
+                font-family: Arial, sans-serif;
+                color: var(--primary-color);
+            }
+            .subheader {
+                font-weight: normal;
+                color: var(--secondary-color);
+                margin-left: 0.5em;
+            }
+            .border {
+                border: 2px solid var(--primary-color);
+                border-radius: 8px;
+                padding: 8px;
+                gap: 5px;
+                display: flex;
+                flex-direction: column;
+                margin-bottom: 5px;
+            }
+            .border label {
+                width: 100%;
+                display: block;
+                cursor: pointer;
+            }
+            .border button {
+                margin-top: 0px;
+                margin-left: auto;
+            }
+            button,
+            input[type="file"]::file-selector-button {
+                padding: 8px 16px;
+                background-color: var(--button-color);
+                border: 1px solid var(--primary-color);
+                border-radius: 4px;
+                cursor: pointer;
+            }
+            button:hover,
+            input[type="file"]::file-selector-button:hover {
+                background-color: var(--button-hover-color);
+            }
+            .error {
+                color: var(--error-color);
+            }
+            .footnote {
+                color: var(--secondary-color);
+                font-size: 0.8em;
+                margin: 0;
+            }
+            input[type="checkbox"] {
+                cursor: pointer;
+                width: 1.2em;
+                height: 1.2em;
+            }
+        </style>
+        <script
+            type="text/javascript"
+            src="https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pyodide.js"
+        ></script>
+    </head>
+    <body>
+        <div class="container">
+            <h1>
+                GPeleX <span class="subheader"> Add elevation data to GPX files </span>
+            </h1>
+            <div class="border">
+                <label>
+                    Select GPX Files:<br />
+                    <input type="file" id="gpxFiles" accept=".gpx" multiple />
+                </label>
+                <label>
+                    Select Elevation Maps<sup>*</sup>:<br />
+                    <input type="file" id="demFiles" accept=".tif,.hgt,.zip" multiple />
+                </label>
+                <label>
+                    <input type="checkbox" id="forceOverwrite" />
+                    Force overwrite existing elevation data
+                </label>
+                <button id="runButton" style="display: none">
+                    Add elevation<sup>**</sup>
+                </button>
+            </div>
+            <p class="footnote">
+                <sup>*</sup>Elevation files can be downloaded from, e.g.,
+                <a href="https://viewfinderpanoramas.org/dem3.html" target="_blank">
+                    Viewfinder Panoramas
+                </a>
+                or national databases.
+            </p>
+            <p class="footnote">
+                <sup>**</sup>All processing happens locally on your device. No data is
+                uploaded or shared.
+            </p>
+            <br />
+            <div id="output"></div>
+            <br />
+            <div id="downloadSection" class="border" style="display: none">
+                Download Processed Files:
+            </div>
+        </div>
+        <script type="text/javascript">
+            async function main() {
+                try {
+                    let pyodide = await loadPyodide();
+                    await pyodide.loadPackage(["gpxpy", "rasterio"]);
+                    // Fetch the gpelex.py script
+                    const response = await fetch("gpelex.py");
+                    const scriptContent = await response.text();
+                    pyodide.FS.writeFile("gpelex.py", scriptContent);
+                } catch (error) {
+                    const err = document.createElement("div");
+                    err.className = "error";
+                    err.innerHTML = error;
+                    document.getElementById("output").appendChild(err);
+                }
+
+                // Set up the run button
+                const runButton = document.getElementById("runButton");
+                const gpxFilesInput = document.getElementById("gpxFiles");
+                const demFilesInput = document.getElementById("demFiles");
+                const downloadSection = document.getElementById("downloadSection");
+                runButton.addEventListener("click", async () => {
+                    if (gpxFilesInput.files.length === 0) {
+                        document.getElementById("output").innerHTML =
+                            "Please select at least one GPX file.";
+                        return;
+                    }
+                    if (demFilesInput.files.length === 0) {
+                        document.getElementById("output").innerHTML =
+                            "Please select at least one elevation file.";
+                        return;
+                    }
+
+                    // Write the DEM files to Pyodide's virtual file system
+                    var demFileNames = "[";
+                    for (const demFile of demFilesInput.files) {
+                        const demContent = await demFile.arrayBuffer();
+                        pyodide.FS.writeFile(demFile.name, new Uint8Array(demContent));
+                        demFileNames += demFile.name + ",";
+                    }
+                    demFileNames += "]";
+
+                    for (const gpxFile of gpxFilesInput.files) {
+                        // Write the GPX file to Pyodide's virtual file system
+                        const gpxContent = await gpxFile.text();
+                        pyodide.FS.writeFile(gpxFile.name, gpxContent);
+
+                        // Run the script with the selected files
+                        try {
+                            const gpxFileName = gpxFile.name;
+                            const index = gpxFileName.lastIndexOf(".");
+                            const outputFileName =
+                                gpxFileName.substring(0, index) +
+                                "_with_elevation" +
+                                gpxFileName.substring(index);
+
+                            const forceOverwrite =
+                                document.getElementById("forceOverwrite").checked;
+                            await pyodide.runPythonAsync(`
+                                    import gpelex
+                                    gpelex.add_elevation_to_gpx("${gpxFileName}", ${demFileNames}, "${outputFileName}", ${forceOverwrite})
+                                `);
+                            // Read the processed GPX file from Pyodide's virtual file system
+                            const processedGpxContent = pyodide.FS.readFile(
+                                outputFileName,
+                                { encoding: "utf8" },
+                            );
+
+                            // Create a download link for the processed GPX file
+                            const processedGpxBlob = new Blob([processedGpxContent], {
+                                type: "application/gpx+xml",
+                            });
+                            const processedGpxUrl = URL.createObjectURL(processedGpxBlob);
+                            const downloadLink = document.createElement("a");
+                            downloadLink.href = processedGpxUrl;
+                            downloadLink.download = outputFileName;
+                            downloadLink.textContent = "Download " + outputFileName;
+                            downloadSection.appendChild(document.createElement("br"));
+                            downloadSection.appendChild(downloadLink);
+                            downloadSection.style.display = "block";
+                        } catch (error) {
+                            const err = document.createElement("div");
+                            err.className = "error";
+                            err.innerHTML = `Error processing ${gpxFile.name}: ${error}`;
+                            document.getElementById("output").appendChild(err);
+                        }
+                    }
+                });
+                runButton.style.display = "block";
+            }
+            main();
+        </script>
+    </body>
+</html>

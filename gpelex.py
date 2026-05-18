@@ -24,7 +24,6 @@ import os
 
 import gpxpy
 import rasterio
-import srtm
 from rasterio.transform import rowcol
 
 
@@ -46,6 +45,8 @@ class ElevationDataManager:
                 dem_file = rasterio.open(dem_path)
                 self.dem_files.append(dem_file)
         else:
+            import srtm
+
             self.elevation_data = srtm.get_data()
 
         return self
@@ -83,17 +84,23 @@ class ElevationDataManager:
 def add_elevation_to_gpx(
     input_gpx_path: str,
     dem_paths: list[str] | None,
-    output_gpx_path: str,
+    output_gpx_path: str | None = None,
     force_overwrite: bool = False,
-) -> None:
+) -> str:
     """Add elevation data to a GPX file using DEM files or the SRTM API.
 
     Args:
         input_gpx_path: Path to the input GPX file.
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
-        output_gpx_path: Path to the output GPX file.
+        output_gpx_path: Path to the output GPX file. If None, a default name is generated.
         force_overwrite: If True, overwrite existing elevation data.
+
+    Returns:
+        The path to the output GPX file.
     """
+
+    if output_gpx_path is None:
+        output_gpx_path = f"{os.path.splitext(input_gpx_path)[0]}_with_elevation.gpx"
 
     with open(input_gpx_path, "r") as gpx_file:
         gpx = gpxpy.parse(gpx_file)
@@ -113,6 +120,7 @@ def add_elevation_to_gpx(
 
     with open(output_gpx_path, "w") as gpx_file:
         gpx_file.write(gpx.to_xml())
+    return output_gpx_path
 
 
 def main():
@@ -148,13 +156,8 @@ def main():
     )
 
     args = parser.parse_args()
-
-    if args.output is None:
-        input_base = os.path.splitext(args.INPUT)[0]
-        args.output = f"{input_base}_with_elevation.gpx"
-
-    add_elevation_to_gpx(args.INPUT, args.dem, args.output, args.force)
-    print(f"GPX file saved successfully. Output saved to {args.output}")
+    output = add_elevation_to_gpx(args.INPUT, args.dem, args.output, args.force)
+    print(f"GPX file saved successfully. Output saved to {output}")
 
 
 if __name__ == "__main__":

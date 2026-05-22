@@ -1,7 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "gpxpy",
 #   "rasterio",
 #   "srtm.py",
 # ]
@@ -21,10 +20,62 @@ Arguments:
 
 import argparse
 import os
+import xml.etree.ElementTree as ET
+from typing import Iterator
 
-import gpxpy
 import rasterio
 from rasterio.transform import rowcol
+
+
+class GPXPoint:
+    """Wrapper for a GPX point (trkpt, wpt, or rtept)."""
+
+    def __init__(self, element: ET.Element, namespace: dict[str, str]):
+        self._element = element
+        self._namespace = namespace
+
+    @property
+    def latitude(self) -> float:
+        return float(self._element.get("lat", ""))
+
+    @property
+    def longitude(self) -> float:
+        return float(self._element.get("lon", ""))
+
+    @property
+    def elevation(self) -> float | None:
+        ele = self._element.find("gpx:ele", self._namespace)
+        return float(ele.text) if ele is not None and ele.text is not None else None
+
+    @elevation.setter
+    def elevation(self, value: float):
+        ele = self._element.find("gpx:ele", self._namespace)
+        if ele is None:
+            ele = ET.SubElement(self._element, "ele")
+        ele.text = str(value)
+
+
+class GPX:
+    """Lightweight GPX parser."""
+
+    def __init__(self, file_source: str | os.PathLike):
+        self.tree = ET.parse(file_source)
+        self.root = self.tree.getroot()
+
+        self.ns_uri = self.root.attrib.get("xmlns", "http://www.topografix.com/GPX/1/1")
+        self.namespaces: dict[str, str] = {"gpx": self.ns_uri}
+
+    def points(self) -> Iterator[GPXPoint]:
+        """Generator yielding all points (trkpt, wpt, rtept) in the GPX file."""
+        for tag in ["trkpt", "wpt", "rtept"]:
+            for node in self.root.findall(f".//gpx:{tag}", self.namespaces):
+                yield GPXPoint(node, self.namespaces)
+
+    def write(self, output_path: str | os.PathLike) -> None:
+        """Write the GPX to a file."""
+        if self.ns_uri:
+            ET.register_namespace("", self.ns_uri)
+        self.tree.write(output_path, encoding="utf-8", xml_declaration=True)
 
 
 class ElevationDataManager:
@@ -34,9 +85,9 @@ class ElevationDataManager:
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
     """
 
-    def __init__(self, dem_file_paths: list[str] | None):
-        self.dem_paths = dem_file_paths
-        self.dem_files: list = []
+    def __init__(self, dem_paths: list[str] | None):
+        self.dem_paths = dem_paths
+        self.dem_files = []
         self.elevation_data = None
 
     def __enter__(self):
@@ -48,7 +99,6 @@ class ElevationDataManager:
             import srtm
 
             self.elevation_data = srtm.get_data()
-
         return self
 
     def query_elevation(self, latitude: float, longitude: float) -> float | None:
@@ -66,16 +116,16 @@ class ElevationDataManager:
                 row, col = rowcol(dem_file.transform, longitude, latitude)
 
                 if 0 <= row < dem_file.height and 0 <= col < dem_file.width:
-                    elevation_value = dem_file.read(1)[row, col]
-                    if elevation_value != dem_file.nodata:
-                        return elevation_value
-        else:
-            if self.elevation_data is not None:
-                return self.elevation_data.get_elevation(latitude, longitude)
-
+                    elevation = dem_file.read(1)[row, col]
+                    if elevation != dem_file.nodata:
+                        return float(elevation)
+        elif self.elevation_data is not None:
+            elevation = self.elevation_data.get_elevation(latitude, longitude)
+            if elevation is not None:
+                return float(elevation)
         return None
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb):
         for dem_file in self.dem_files:
             dem_file.close()
         self.dem_files = []
@@ -102,25 +152,20 @@ def add_elevation_to_gpx(
     if output_gpx_path is None:
         output_gpx_path = f"{os.path.splitext(input_gpx_path)[0]}_with_elevation.gpx"
 
-    with open(input_gpx_path, "r") as gpx_file:
-        gpx = gpxpy.parse(gpx_file)
-
-    if not force_overwrite:
-        no_ele = not gpx.has_elevations()
-        assert no_ele, "GPX file already has elevation data. Use --force to overwrite."
-
+    gpx = GPX(input_gpx_path)
+    elevation_was_added = False
     with ElevationDataManager(dem_paths if dem_paths else None) as elevation:
-        for point in gpx.walk(True):
-            if point.elevation is not None and not force_overwrite:
-                continue
+        for point in gpx.points():
+            if force_overwrite or point.elevation is None:
+                value = elevation.query_elevation(point.latitude, point.longitude)
+                if value is not None:
+                    point.elevation = value
+                    elevation_was_added = True
 
-            value = elevation.query_elevation(point.latitude, point.longitude)
-            if value is not None:
-                point.elevation = value
-
-    with open(output_gpx_path, "w") as gpx_file:
-        gpx_file.write(gpx.to_xml())
-    return output_gpx_path
+    if elevation_was_added:
+        gpx.write(output_gpx_path)
+        return output_gpx_path
+    return input_gpx_path
 
 
 def main():
@@ -157,7 +202,10 @@ def main():
 
     args = parser.parse_args()
     output = add_elevation_to_gpx(args.INPUT, args.dem, args.output, args.force)
-    print(f"GPX file saved successfully. Output saved to {output}")
+    if output == args.INPUT:
+        print(f"No changes made to: {output}")
+    else:
+        print(f"GPX file saved successfully to: {output}")
 
 
 if __name__ == "__main__":

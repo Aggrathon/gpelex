@@ -159,7 +159,9 @@ def test_interpolate_elevations(tmp_path):
     )
 
     with ElevationDataManager([str(tif_path), str(tif_path)]) as mgr:
-        assert mgr.query_elevation(south + 1e-4, west + 3e-4) > elevations[2, 0]
+        assert mgr.query_elevation(south + 1e-4, west + 1e-4) > elevations[2, 0]
+        assert mgr.query_elevation(north - 1e-4, west + 1e-4) < elevations[0, 0]
+        assert mgr.query_elevation(north - 1e-4, east - 1e-4) < elevations[0, 2]
         for i in range(3):
             for j in range(3):
                 for k in range(max(i - 1, 0), min(i + 2, 3)):

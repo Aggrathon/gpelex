@@ -27,6 +27,7 @@ from typing import Iterator
 import numpy as np
 import rasterio
 from rasterio.transform import rowcol
+from rasterio.windows import Window
 from scipy.interpolate import interpn
 
 
@@ -137,27 +138,20 @@ class ElevationDataManager:
         row, col = rowcol(dem_file.transform, longitude, latitude)
         if 0 <= row < height and 0 <= col < width:
             x, y = rowcol(dem_file.transform, longitude, latitude, op=lambda v: v)
-            dem = dem_file.read(1)
-            points = {
-                (i, j): elevation
-                for i in range(row - 1, row + 2)
-                for j in range(col - 1, col + 2)
-                if 0 <= i < height and 0 <= j < width
-                if (elevation := dem[i, j]) != dem_file.nodata
-            }
-            if len(points) == 1:
-                return next(iter(points.values()))
-            elif points:
-                xs = np.unique([i for i, _ in points.keys()])
-                ys = np.unique([j for _, j in points.keys()])
+            rows = (max(row - 1, 0), min(row + 2, height))
+            cols = (max(col - 1, 0), min(col + 2, width))
+            dem = dem_file.read(1, window=Window.from_slices(rows, cols))
+            if dem.size == 1:
+                return float(dem[0, 0])
+            elif dem.size:
                 return interpn(
-                    (xs, ys),
-                    [[points[(i, j)] for j in ys] for i in xs],
+                    (np.arange(*rows), np.arange(*cols)),
+                    dem[..., None],
                     [[x - 0.5, y - 0.5]],
                     method="slinear",
                     bounds_error=False,
                     fill_value=None,
-                )[0]
+                )[0, 0]
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         for dem_file in self.dem_files:

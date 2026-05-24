@@ -3,6 +3,7 @@
 # dependencies = [
 #   "rasterio",
 #   "srtm.py",
+#   "scipy",
 # ]
 # ///
 """
@@ -23,8 +24,10 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Iterator
 
+import numpy as np
 import rasterio
 from rasterio.transform import rowcol
+from scipy.interpolate import interpn
 
 
 class GPXPoint:
@@ -104,6 +107,10 @@ class ElevationDataManager:
     def query_elevation(self, latitude: float, longitude: float) -> float | None:
         """Query elevation for a point using DEM files or the SRTM API.
 
+        When using DEM files, interpolates elevation by finding the three closest
+        DEM pixels using rowcol and checking +/-1 neighbors, then performing
+        triangulation-based interpolation.
+
         Args:
             latitude: Latitude of the point.
             longitude: Longitude of the point.
@@ -113,17 +120,44 @@ class ElevationDataManager:
         """
         if self.dem_paths is not None:
             for dem_file in self.dem_files:
-                row, col = rowcol(dem_file.transform, longitude, latitude)
-
-                if 0 <= row < dem_file.height and 0 <= col < dem_file.width:
-                    elevation = dem_file.read(1)[row, col]
-                    if elevation != dem_file.nodata:
-                        return float(elevation)
+                elevation = self._dem_interpolate(dem_file, latitude, longitude)
+                if elevation is not None:
+                    return float(elevation)
         elif self.elevation_data is not None:
             elevation = self.elevation_data.get_elevation(latitude, longitude)
             if elevation is not None:
                 return float(elevation)
         return None
+
+    def _dem_interpolate(
+        self, dem_file, latitude: float, longitude: float
+    ) -> float | None:
+        """Interpolate elevation using the 3 closest DEM pixels."""
+        height, width = dem_file.shape
+        row, col = rowcol(dem_file.transform, longitude, latitude)
+        if 0 <= row < height and 0 <= col < width:
+            x, y = rowcol(dem_file.transform, longitude, latitude, op=lambda v: v)
+            dem = dem_file.read(1)
+            points = {
+                (i, j): elevation
+                for i in range(row - 1, row + 2)
+                for j in range(col - 1, col + 2)
+                if 0 <= i < height and 0 <= j < width
+                if (elevation := dem[i, j]) != dem_file.nodata
+            }
+            if len(points) == 1:
+                return next(iter(points.values()))
+            elif points:
+                xs = np.unique([i for i, _ in points.keys()])
+                ys = np.unique([j for _, j in points.keys()])
+                return interpn(
+                    (xs, ys),
+                    [[points[(i, j)] for j in ys] for i in xs],
+                    [[x - 0.5, y - 0.5]],
+                    method="slinear",
+                    bounds_error=False,
+                    fill_value=None,
+                )[0]
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         for dem_file in self.dem_files:

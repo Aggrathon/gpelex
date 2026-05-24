@@ -3,7 +3,6 @@
 # dependencies = [
 #   "rasterio",
 #   "srtm.py",
-#   "pytest"
 # ]
 # ///
 """
@@ -14,30 +13,47 @@ Run with: `uvx --with-requirements gpelex.py pytest test_gpelex.py`
 import numpy as np
 import rasterio
 import srtm
-from rasterio.transform import Affine
+from rasterio.transform import from_bounds
 
 from gpelex import GPX, ElevationDataManager, add_elevation_to_gpx
 
 
-def create_tif_from_elevation(
-    path: str, lat: float, lon: float, elevation_value: float, pixel_size: float = 0.01
+def create_tif_from_single_elevation(
+    path: str, latitude: float, longitude: float, elevation: float = 0.0
 ):
-    """Create a GeoTIFF file from a single elevation value."""
-    elevation_array = np.array([[elevation_value]], dtype=np.float32)
-    transform = Affine(pixel_size, 0, lon, 0, -pixel_size, lat)
+    create_tif_from_multiple_elevations(
+        path,
+        longitude - 0.0001,
+        latitude - 0.0001,
+        longitude + 0.0001,
+        latitude + 0.0001,
+        np.full((1, 1), elevation),
+    )
+
+
+def create_tif_from_multiple_elevations(
+    path: str,
+    west: float,
+    south: float,
+    east: float,
+    north: float,
+    elevations: np.ndarray,
+):
+    height, width = elevations.shape
+    transform = from_bounds(west, south, east, north, width, height)
     with rasterio.open(
         path,
         "w",
         driver="GTiff",
-        height=1,
-        width=1,
+        height=height,
+        width=width,
         count=1,
-        dtype=elevation_array.dtype,
+        dtype=elevations.dtype,
         crs="EPSG:4326",
         transform=transform,
         nodata=-9999,
     ) as dst:
-        dst.write(elevation_array, 1)
+        dst.write(elevations, 1)
 
 
 def create_gpx_file(gpx_path: str, with_elevation: bool = False) -> None:
@@ -104,20 +120,59 @@ def test_query_elevation_from_srtm_api():
 def test_query_elevation_from_dem_file(tmp_path):
     """Test querying elevation data from a DEM file and compare with SRTM API."""
     elevation_data = srtm.get_data()
-    elevation_api = float(elevation_data.get_elevation(48.8584, 2.2945))
+    elevation = float(elevation_data.get_elevation(48.8584, 2.2945))
     with ElevationDataManager(None) as mgr:
-        assert elevation_api == mgr.query_elevation(48.8584, 2.2945)
+        assert elevation == mgr.query_elevation(48.8584, 2.2945)
 
     tif_path = tmp_path / "dem_test.tif"
-    create_tif_from_elevation(tif_path, 48.8584, 2.2945, elevation_api)
+    create_tif_from_single_elevation(tif_path, 48.8584, 2.2945, elevation)
     with ElevationDataManager([str(tif_path)]) as mgr:
-        assert mgr.query_elevation(48.8584, 2.2945) == elevation_api
+        assert mgr.query_elevation(48.8584, 2.2945) == elevation
 
     tif_path2 = tmp_path / "dem_test2.tif"
-    create_tif_from_elevation(tif_path2, 51.5074, -0.1278, 125.0)
+    create_tif_from_single_elevation(tif_path2, 51.5074, -0.1278, 125.0)
     with ElevationDataManager([str(tif_path), str(tif_path2)]) as mgr:
-        assert mgr.query_elevation(48.8584, 2.2945) == elevation_api
+        assert mgr.query_elevation(48.8584, 2.2945) == elevation
         assert mgr.query_elevation(51.5074, -0.1278) == 125.0
+
+
+def test_interpolate_elevations(tmp_path):
+    """Test creating a GeoTIFF from multiple elevation values using from_bounds."""
+    elevations = np.array(
+        [
+            [100.0, 102.0, 101.0],
+            [103.0, 104.0, 105.0],
+            [108.0, 107.0, 106.0],
+        ],
+        dtype=np.float32,
+    )
+    west, south, east, north = 2.2940, 48.8580, 2.2950, 48.8590
+    tif_path = tmp_path / "multi_elev.tif"
+    create_tif_from_multiple_elevations(
+        str(tif_path), west, south, east, north, elevations
+    )
+    points = np.array(
+        [
+            [[y, x] for x in np.linspace(west, east, 7)[1:-1:2]]
+            for y in reversed(np.linspace(south, north, 7)[1:-1:2])
+        ]
+    )
+
+    with ElevationDataManager([str(tif_path), str(tif_path)]) as mgr:
+        assert mgr.query_elevation(south + 1e-4, west + 3e-4) > elevations[2, 0]
+        for i in range(3):
+            for j in range(3):
+                for k in range(max(i - 1, 0), min(i + 2, 3)):
+                    for l in range(max(j - 1, 0), min(j + 2, 3)):
+                        lat = (points[i, j, 0] + points[k, l, 0]) * 0.5
+                        lon = (points[i, j, 1] + points[k, l, 1]) * 0.5
+                        if abs(i - k) + abs(j - l) < 2:
+                            ele = (elevations[i, j] + elevations[k, l]) * 0.5
+                            assert abs(mgr.query_elevation(lat, lon) - ele) <= 0.1
+                        else:
+                            emax = max(elevations[i, j], elevations[k, l])
+                            emin = min(elevations[i, j], elevations[k, l])
+                            assert emin < mgr.query_elevation(lat, lon) < emax
 
 
 def test_gpx_class_parse(tmp_path):
@@ -128,7 +183,7 @@ def test_gpx_class_parse(tmp_path):
     create_gpx_file(str(input_gpx), with_elevation=True)
     gpx = GPX(input_gpx)
     points = list(gpx.points())
-    assert len(points) == 3  # 3 waypoints in the GPX file
+    assert len(points) == 3
 
     for point in points:
         assert point.elevation == 100.0

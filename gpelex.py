@@ -41,7 +41,7 @@ from scipy.interpolate import interpn
 def open_dem_files(paths: list[str], extract: bool = False) -> list:
     """Open DEM files, expanding archives and extracting archive items if needed."""
     dem_files = []
-    geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat")
+    geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat", ".hgt")
 
     for path in paths:
         if path.endswith(geospatial_ext):
@@ -117,7 +117,7 @@ class GPXPoint:
         ele = self._element.find("gpx:ele", self._namespace)
         if ele is None:
             ele = ET.SubElement(self._element, "ele")
-        ele.text = str(value)
+        ele.text = f"{value:.3g}"
 
 
 class GPX:
@@ -155,7 +155,7 @@ class ElevationDataManager:
     """
 
     def __init__(
-        self, dem_paths: list[str] | None, extract: bool = False, verbose: bool = False
+        self, dem_paths: list[str] | None, extract: bool = False, verbose: int = 0
     ):
         self.dem_paths = dem_paths
         self.dem_files = []
@@ -167,12 +167,17 @@ class ElevationDataManager:
     def __enter__(self):
         if self.dem_paths is not None:
             self.dem_files = open_dem_files(self.dem_paths, self.extract)
-            if self.verbose and self.dem_files:
-                logging.info("Using DEM files:")
-                for dem_file in self.dem_files:
-                    logging.info(
-                        f"  - {dem_file.name}: {dem_file.lnglat()} {dem_file.crs}"
-                    )
+            if self.verbose:
+                if self.dem_files:
+                    logging.info(f"Using DEM files ({len(self.dem_files)})")
+                    if self.verbose > 1:
+                        logging.info("Using DEM files:")
+                        for dem_file in self.dem_files:
+                            logging.info(
+                                f" - {dem_file.name}: {dem_file.lnglat()} {dem_file.crs}"
+                            )
+                else:
+                    logging.info("No DEM files supplied")
         else:
             import srtm
 
@@ -252,7 +257,7 @@ def add_elevation_to_gpx(
         output_path: Path to the output GPX file. If None, a default name is generated.
         overwrite: If True, overwrite existing elevation data.
         extract: If True, (force) extract archive contents before processing.
-        verbose: Verbose level (1: summary info including data source, 2: per-point details).
+        verbose: Verbose level (1: summary info, 2: per-point details).
 
     Returns:
         The path to the output GPX file.
@@ -268,7 +273,7 @@ def add_elevation_to_gpx(
         logging.info(f"Loading GPX file: {input_path}")
 
     with ElevationDataManager(
-        dem_paths if dem_paths else None, extract, verbose >= 1
+        dem_paths if dem_paths else None, extract, verbose
     ) as elevation:
         point_count = 0
         for point in gpx.points():
@@ -290,7 +295,7 @@ def add_elevation_to_gpx(
 
     if point_updates:
         gpx.write(output_path)
-        if verbose >= 2:
+        if verbose >= 1:
             logging.info(f"GPX file saved to: {output_path}")
         return output_path
 

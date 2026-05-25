@@ -3,7 +3,8 @@
 # dependencies = [
 #   "rasterio",
 #   "srtm.py",
-#   "scipy",
+#   "numpy",
+#   "scipy"
 # ]
 # ///
 """
@@ -21,7 +22,9 @@ Arguments:
 
 import argparse
 import os
+import tarfile
 import xml.etree.ElementTree as ET
+import zipfile
 from typing import Iterator
 
 import numpy as np
@@ -87,6 +90,8 @@ class ElevationDataManager:
 
     Args:
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
+                  Automatically scans zip and tar files for DEM datasets inside.
+                  Supports both regular files and archive:// URLs (e.g., zip:///path/to/file.zip!dataset.tif).
     """
 
     def __init__(self, dem_paths: list[str] | None):
@@ -94,9 +99,45 @@ class ElevationDataManager:
         self.dem_files = []
         self.elevation_data = None
 
+    def _expand_archive_paths(self, paths: list[str]) -> list[str]:
+        """Expand archive file paths to individual TIF paths inside."""
+        expanded = []
+
+        for path in paths:
+            if path.startswith(("zip://", "tar://", "hdf5://")):
+                expanded.append(path)
+                continue
+
+            geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat")
+            try:
+                with zipfile.ZipFile(path, "r") as zf:
+                    expanded.extend(
+                        f"zip://{path}!{n}"
+                        for n in zf.namelist()
+                        if n.lower().endswith(geospatial_ext)
+                    )
+                    continue
+            except (zipfile.BadZipFile, OSError):
+                pass
+
+            try:
+                with tarfile.open(path, "r:*") as tf:
+                    expanded.extend(
+                        f"tar://{path}!{n}"
+                        for n in tf.getnames()
+                        if n.lower().endswith(geospatial_ext)
+                    )
+                    continue
+            except (tarfile.TarError, OSError):
+                pass
+
+            expanded.append(path)
+        return expanded
+
     def __enter__(self):
         if self.dem_paths is not None:
-            for dem_path in self.dem_paths:
+            expanded_paths = self._expand_archive_paths(self.dem_paths)
+            for dem_path in expanded_paths:
                 dem_file = rasterio.open(dem_path)
                 self.dem_files.append(dem_file)
         else:

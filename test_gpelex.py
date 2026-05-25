@@ -1,14 +1,20 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#   "pytest",
 #   "rasterio",
 #   "srtm.py",
+#   "numpy",
+#   "scipy",
 # ]
 # ///
 """
 Pytest tests for gpelex.py
 Run with: `uvx --with-requirements gpelex.py pytest test_gpelex.py`
 """
+
+import shutil
+import tarfile
 
 import numpy as np
 import rasterio
@@ -134,6 +140,29 @@ def test_query_elevation_from_dem_file(tmp_path):
     with ElevationDataManager([str(tif_path), str(tif_path2)]) as mgr:
         assert mgr.query_elevation(48.8584, 2.2945) == elevation
         assert mgr.query_elevation(51.5074, -0.1278) == 125.0
+
+
+def test_query_archive_zip(tmp_path):
+    """Test querying elevation from ZIP archive."""
+    create_tif_from_single_elevation(tmp_path / "north.tif", 48.8584, 2.2945, 175.0)
+    create_tif_from_single_elevation(tmp_path / "south.tif", 51.5074, -0.1278, 124.0)
+    zip_path = tmp_path / "test.zip"
+    shutil.make_archive(str(zip_path).replace(".zip", ""), "zip", tmp_path)
+    with ElevationDataManager([str(zip_path)]) as mgr:
+        assert mgr.query_elevation(48.8584, 2.2945) == 175.0
+        assert mgr.query_elevation(51.5074, -0.1278) == 124.0
+
+
+def test_query_archive_tar(tmp_path):
+    """Test querying elevation from TAR archive."""
+    create_tif_from_single_elevation(tmp_path / "east.tif", 40.7128, -74.0060, 10.0)
+    create_tif_from_single_elevation(tmp_path / "west.tif", 35.6762, 139.6503, 40.0)
+    tar_path = tmp_path / "test.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(tmp_path, arcname="data")
+    with ElevationDataManager([str(tar_path)]) as mgr:
+        assert mgr.query_elevation(40.7128, -74.0060) == 10.0
+        assert mgr.query_elevation(35.6762, 139.6503) == 40.0
 
 
 def test_interpolate_elevations(tmp_path):

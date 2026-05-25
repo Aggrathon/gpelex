@@ -23,6 +23,7 @@ Arguments:
 import argparse
 import os
 import tarfile
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from typing import Iterator
@@ -32,6 +33,60 @@ import rasterio
 from rasterio.transform import rowcol
 from rasterio.windows import Window
 from scipy.interpolate import interpn
+
+
+def open_dem_files(paths: list[str], extract_archives: bool = False) -> list:
+    """Open DEM files, expanding archives and extracting archive items if needed."""
+    dem_files = []
+    geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat")
+
+    for path in paths:
+        if path.endswith(geospatial_ext):
+            dem_file = rasterio.open(path)
+            dem_files.append(dem_file)
+            continue
+
+        try:
+            with zipfile.ZipFile(path) as archive:
+                items = [
+                    item for item in archive.namelist() if item.endswith(geospatial_ext)
+                ]
+                if extract_archives and items:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        for item in items:
+                            dem_file = rasterio.open(archive.extract(item, tmpdir))
+                            dem_files.append(dem_file)
+                else:
+                    for item in items:
+                        dem_file = rasterio.open(f"zip+file://{path}!{item}")
+                        dem_files.append(dem_file)
+                continue
+        except (zipfile.BadZipFile, OSError):
+            pass
+
+        try:
+            with tarfile.open(path) as archive:
+                items = [
+                    item for item in archive.getnames() if item.endswith(geospatial_ext)
+                ]
+                if extract_archives and items:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        for item in items:
+                            archive.extract(item, tmpdir, filter="data")
+                            dem_file = rasterio.open(os.path.join(tmpdir, item))
+                            dem_files.append(dem_file)
+                elif not extract_archives:
+                    for item in items:
+                        dem_file = rasterio.open(f"tar+file://{path}!{item}")
+                        dem_files.append(dem_file)
+                continue
+        except (tarfile.TarError, OSError):
+            pass
+
+        dem_file = rasterio.open(path)
+        dem_files.append(dem_file)
+
+    return dem_files
 
 
 class GPXPoint:
@@ -90,56 +145,20 @@ class ElevationDataManager:
 
     Args:
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
-                  Automatically scans zip and tar files for DEM datasets inside.
-                  Supports both regular files and archive:// URLs (e.g., zip:///path/to/file.zip!dataset.tif).
+                Supports both regular files and zip/tar archives with multiple files.
+                Also supports archive:// URLs (e.g., zip:///path/to/file.zip!dataset.tif).
+        extract_archives: If True, force extract archive contents before processing (on platforms where archive:// URLs are not working).
     """
 
-    def __init__(self, dem_paths: list[str] | None):
+    def __init__(self, dem_paths: list[str] | None, extract_archives: bool = False):
         self.dem_paths = dem_paths
         self.dem_files = []
         self.elevation_data = None
-
-    def _expand_archive_paths(self, paths: list[str]) -> list[str]:
-        """Expand archive file paths to individual TIF paths inside."""
-        expanded = []
-
-        for path in paths:
-            if path.startswith(("zip://", "tar://", "hdf5://")):
-                expanded.append(path)
-                continue
-
-            geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat")
-            try:
-                with zipfile.ZipFile(path, "r") as zf:
-                    expanded.extend(
-                        f"zip://{path}!{n}"
-                        for n in zf.namelist()
-                        if n.lower().endswith(geospatial_ext)
-                    )
-                    continue
-            except (zipfile.BadZipFile, OSError):
-                pass
-
-            try:
-                with tarfile.open(path, "r:*") as tf:
-                    expanded.extend(
-                        f"tar://{path}!{n}"
-                        for n in tf.getnames()
-                        if n.lower().endswith(geospatial_ext)
-                    )
-                    continue
-            except (tarfile.TarError, OSError):
-                pass
-
-            expanded.append(path)
-        return expanded
+        self.extract_archives = extract_archives
 
     def __enter__(self):
         if self.dem_paths is not None:
-            expanded_paths = self._expand_archive_paths(self.dem_paths)
-            for dem_path in expanded_paths:
-                dem_file = rasterio.open(dem_path)
-                self.dem_files.append(dem_file)
+            self.dem_files = open_dem_files(self.dem_paths, self.extract_archives)
         else:
             import srtm
 
@@ -205,6 +224,7 @@ def add_elevation_to_gpx(
     dem_paths: list[str] | None,
     output_gpx_path: str | None = None,
     force_overwrite: bool = False,
+    extract_archives: bool = False,
 ) -> str:
     """Add elevation data to a GPX file using DEM files or the SRTM API.
 
@@ -213,6 +233,7 @@ def add_elevation_to_gpx(
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
         output_gpx_path: Path to the output GPX file. If None, a default name is generated.
         force_overwrite: If True, overwrite existing elevation data.
+        extract_archives: If True, (force) extract archive contents before processing.
 
     Returns:
         The path to the output GPX file.
@@ -223,7 +244,9 @@ def add_elevation_to_gpx(
 
     gpx = GPX(input_gpx_path)
     elevation_was_added = False
-    with ElevationDataManager(dem_paths if dem_paths else None) as elevation:
+    with ElevationDataManager(
+        dem_paths if dem_paths else None, extract_archives
+    ) as elevation:
         for point in gpx.points():
             if force_overwrite or point.elevation is None:
                 value = elevation.query_elevation(point.latitude, point.longitude)
@@ -260,7 +283,7 @@ def main():
         type=str,
         nargs="*",
         default=None,
-        help="Path to one or more DEM files (e.g., .tif files). If not provided, elevation data will be queried using the elevation library.",
+        help="Path to one or more DEM files (e.g., .tif files or archives containing .tif files). If not provided, elevation data will be queried using the SRTM library.",
     )
     parser.add_argument(
         "-f",
@@ -268,9 +291,17 @@ def main():
         action="store_true",
         help="Force overwrite existing elevation data in the GPX file.",
     )
+    parser.add_argument(
+        "--extract-archives",
+        "-e",
+        action="store_true",
+        help="Extract archive contents before processing (only needed for special file systems).",
+    )
 
     args = parser.parse_args()
-    output = add_elevation_to_gpx(args.INPUT, args.dem, args.output, args.force)
+    output = add_elevation_to_gpx(
+        args.INPUT, args.dem, args.output, args.force, args.extract_archives
+    )
     if output == args.INPUT:
         print(f"No changes made to: {output}")
     else:

@@ -13,8 +13,8 @@ Pytest tests for gpelex.py
 Run with: `uvx --with-requirements gpelex.py pytest test_gpelex.py`
 """
 
-import shutil
 import tarfile
+import zipfile
 
 import numpy as np
 import rasterio
@@ -147,8 +147,13 @@ def test_query_archive_zip(tmp_path):
     create_tif_from_single_elevation(tmp_path / "north.tif", 48.8584, 2.2945, 175.0)
     create_tif_from_single_elevation(tmp_path / "south.tif", 51.5074, -0.1278, 124.0)
     zip_path = tmp_path / "test.zip"
-    shutil.make_archive(str(zip_path).replace(".zip", ""), "zip", tmp_path)
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(tmp_path / "north.tif", "north.tif")
+        zf.write(tmp_path / "south.tif", "tmp/south.tif")
     with ElevationDataManager([str(zip_path)]) as mgr:
+        assert mgr.query_elevation(48.8584, 2.2945) == 175.0
+        assert mgr.query_elevation(51.5074, -0.1278) == 124.0
+    with ElevationDataManager([str(zip_path)], extract_archives=True) as mgr:
         assert mgr.query_elevation(48.8584, 2.2945) == 175.0
         assert mgr.query_elevation(51.5074, -0.1278) == 124.0
 
@@ -159,8 +164,12 @@ def test_query_archive_tar(tmp_path):
     create_tif_from_single_elevation(tmp_path / "west.tif", 35.6762, 139.6503, 40.0)
     tar_path = tmp_path / "test.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tf:
-        tf.add(tmp_path, arcname="data")
+        tf.add(tmp_path / "east.tif", "east.tif")
+        tf.add(tmp_path / "west.tif", "tmp/west.tif")
     with ElevationDataManager([str(tar_path)]) as mgr:
+        assert mgr.query_elevation(40.7128, -74.0060) == 10.0
+        assert mgr.query_elevation(35.6762, 139.6503) == 40.0
+    with ElevationDataManager([str(tar_path)], extract_archives=True) as mgr:
         assert mgr.query_elevation(40.7128, -74.0060) == 10.0
         assert mgr.query_elevation(35.6762, 139.6503) == 40.0
 

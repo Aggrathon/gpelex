@@ -39,7 +39,19 @@ from scipy.interpolate import interpn
 
 
 def open_dem_files(paths: list[str], extract: bool = False) -> list:
-    """Open DEM files, expanding archives and extracting archive items if needed."""
+    """Open DEM files, expanding archives and extracting archive items if needed.
+
+    Args:
+        paths: List of paths to DEM files. Supports regular geospatial files
+               (e.g., .tif, .hgt, .img) and archives (zip, tar) containing
+               geospatial files.
+        extract: If True, force extract archive contents to temporary
+                 directories before opening. Required on platforms where
+                 archive:// URLs are not supported.
+
+    Returns:
+        List of opened rasterio DEM file handles.
+    """
     dem_files = []
     geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat", ".hgt")
 
@@ -147,51 +159,38 @@ class ElevationDataManager:
     """Context manager for DEM files to simplify elevation queries.
 
     Args:
-        dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
+        dem_paths: List of paths to DEM files.
                 Supports both regular files and zip/tar archives with multiple files.
                 Also supports archive:// URLs (e.g., zip:///path/to/file.zip!dataset.tif).
         extract: If True, force extract archive contents before processing (on platforms where archive:// URLs are not working).
         verbose: If True, print information about the data source.
     """
 
-    def __init__(
-        self, dem_paths: list[str] | None, extract: bool = False, verbose: int = 0
-    ):
+    def __init__(self, dem_paths: list[str], extract: bool = False, verbose: int = 0):
         self.dem_paths = dem_paths
         self.dem_files = []
-        self.elevation_data = None
         self.extract = extract
         self.verbose = verbose
         self.crs = CRS.from_epsg(4326)
 
     def __enter__(self):
-        if self.dem_paths is not None:
-            self.dem_files = open_dem_files(self.dem_paths, self.extract)
-            if self.verbose:
-                if self.dem_files:
-                    logging.info(f"Using DEM files ({len(self.dem_files)})")
-                    if self.verbose > 1:
-                        logging.info("Using DEM files:")
-                        for dem_file in self.dem_files:
-                            logging.info(
-                                f" - {dem_file.name}: {dem_file.lnglat()} {dem_file.crs}"
-                            )
-                else:
-                    logging.info("No DEM files supplied")
-        else:
-            import srtm
-
-            self.elevation_data = srtm.get_data()
-            if self.verbose:
-                logging.info("Using online SRTM (30m) data")
+        self.dem_files = open_dem_files(self.dem_paths, self.extract)
+        if self.verbose:
+            if self.dem_files:
+                logging.info(f"Using DEM files ({len(self.dem_files)})")
+                if self.verbose > 1:
+                    for dem_file in self.dem_files:
+                        logging.info(
+                            f" - {dem_file.name}: {dem_file.lnglat()} {dem_file.crs}"
+                        )
+            else:
+                logging.info("No DEM files supplied")
         return self
 
-    def query_elevation(self, latitude: float, longitude: float) -> float | None:
-        """Query elevation for a point using DEM files or the SRTM API.
+    def elevation(self, latitude: float, longitude: float) -> float | None:
+        """Query elevation for a point using DEM files.
 
-        When using DEM files, interpolates elevation by finding the three closest
-        DEM pixels using rowcol and checking +/-1 neighbors, then performing
-        triangulation-based interpolation.
+        Estimates elevation by finding the closest DEM pixels and performing interpolation.
 
         Args:
             latitude: Latitude of the point.
@@ -200,45 +199,73 @@ class ElevationDataManager:
         Returns:
             Elevation in meters, or None if unavailable.
         """
-        if self.dem_paths is not None:
-            for dem_file in self.dem_files:
-                elevation = self._dem_interpolate(dem_file, latitude, longitude)
-                if elevation is not None:
-                    return float(elevation)
-        elif self.elevation_data is not None:
-            elevation = self.elevation_data.get_elevation(latitude, longitude)
+        for dem_file in self.dem_files:
+            height, width = dem_file.shape
+            elevation = None
+            lon, lat = transform(self.crs, dem_file.crs, [longitude], [latitude])
+            row, col = rowcol(dem_file.transform, lon[0], lat[0])
+            if 0 <= row < height and 0 <= col < width:
+                x, y = rowcol(dem_file.transform, lon[0], lat[0], op=lambda v: v)
+                rows = (max(row - 1, 0), min(row + 2, height))
+                cols = (max(col - 1, 0), min(col + 2, width))
+                dem = dem_file.read(1, window=Window.from_slices(rows, cols))
+                if dem.size == 1:
+                    elevation = float(dem[0, 0])
+                elif dem.size:
+                    elevation = interpn(
+                        (np.arange(*rows), np.arange(*cols)),
+                        dem[..., None],
+                        [[x - 0.5, y - 0.5]],
+                        method="slinear",
+                        bounds_error=False,
+                        fill_value=None,
+                    )[0, 0]
             if elevation is not None:
                 return float(elevation)
         return None
-
-    def _dem_interpolate(
-        self, dem_file, latitude: float, longitude: float
-    ) -> float | None:
-        """Interpolate elevation using the 3 closest DEM pixels."""
-        height, width = dem_file.shape
-        lon, lat = transform(self.crs, dem_file.crs, [longitude], [latitude])
-        row, col = rowcol(dem_file.transform, lon[0], lat[0])
-        if 0 <= row < height and 0 <= col < width:
-            x, y = rowcol(dem_file.transform, lon[0], lat[0], op=lambda v: v)
-            rows = (max(row - 1, 0), min(row + 2, height))
-            cols = (max(col - 1, 0), min(col + 2, width))
-            dem = dem_file.read(1, window=Window.from_slices(rows, cols))
-            if dem.size == 1:
-                return float(dem[0, 0])
-            elif dem.size:
-                return interpn(
-                    (np.arange(*rows), np.arange(*cols)),
-                    dem[..., None],
-                    [[x - 0.5, y - 0.5]],
-                    method="slinear",
-                    bounds_error=False,
-                    fill_value=None,
-                )[0, 0]
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         for dem_file in self.dem_files:
             dem_file.close()
         self.dem_files = []
+
+
+class ElevationOnlineManager:
+    """Wrapper for online elevation data (SRTM).
+
+    Uses the SRTM library to fetch 30m resolution elevation data online.
+    """
+
+    def __init__(self, verbose: int = 0):
+        self.verbose = verbose
+        self.data = None
+
+    def __enter__(self):
+        import srtm
+
+        self.data = srtm.get_data()
+        if self.verbose:
+            logging.info("Using online SRTM (30m) data")
+        return self
+
+    def elevation(self, latitude: float, longitude: float) -> float | None:
+        """Query elevation for a point using the SRTM API.
+
+        Args:
+            latitude: Latitude of the point.
+            longitude: Longitude of the point.
+
+        Returns:
+            Elevation in meters, or None if unavailable.
+        """
+        if self.data is not None:
+            elevation = self.data.get_elevation(latitude, longitude)
+            if elevation is not None:
+                return float(elevation)
+        return None
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 
 def add_elevation_to_gpx(
@@ -268,14 +295,16 @@ def add_elevation_to_gpx(
 
     gpx = GPX(input_path)
     point_updates = 0
+    point_count = 0
 
     if verbose >= 1:
         logging.info(f"Loading GPX file: {input_path}")
 
-    with ElevationDataManager(
-        dem_paths if dem_paths else None, extract, verbose
+    with (
+        ElevationOnlineManager(verbose)
+        if dem_paths is None
+        else ElevationDataManager(dem_paths, extract, verbose)
     ) as elevation:
-        point_count = 0
         for point in gpx.points():
             point_count += 1
             if overwrite or point.elevation is None:
@@ -283,7 +312,7 @@ def add_elevation_to_gpx(
                     logging.info(
                         f"Querying elevation at lat={point.latitude}, lon={point.longitude}, ele={point.elevation}"
                     )
-                value = elevation.query_elevation(point.latitude, point.longitude)
+                value = elevation.elevation(point.latitude, point.longitude)
                 if value is not None:
                     point.elevation = value
                     point_updates += 1
@@ -305,10 +334,7 @@ def add_elevation_to_gpx(
 
 
 def main():
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(levelname)s: %(message)s",
-    )
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
     parser = argparse.ArgumentParser(
         description="Add elevation data to a GPX file using one or more DEM files or the elevation library."

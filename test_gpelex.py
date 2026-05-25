@@ -21,7 +21,12 @@ import rasterio
 import srtm
 from rasterio.transform import from_bounds
 
-from gpelex import GPX, ElevationDataManager, add_elevation_to_gpx
+from gpelex import (
+    GPX,
+    ElevationDataManager,
+    ElevationOnlineManager,
+    add_elevation_to_gpx,
+)
 
 
 def create_tif_from_single_elevation(
@@ -122,8 +127,8 @@ def test_add_elevation_to_gpx_with_elevation_force(tmp_path):
 
 def test_query_elevation_from_srtm_api():
     """Test querying elevation data from the srtm.py library."""
-    with ElevationDataManager(None) as elevation_manager:
-        elevation = elevation_manager.query_elevation(48.8584, 2.2945)
+    with ElevationOnlineManager() as mgr:
+        elevation = mgr.elevation(48.8584, 2.2945)
     assert isinstance(elevation, float)
 
 
@@ -131,19 +136,19 @@ def test_query_elevation_from_dem_file(tmp_path):
     """Test querying elevation data from a DEM file and compare with SRTM API."""
     elevation_data = srtm.get_data()
     elevation = float(elevation_data.get_elevation(48.8584, 2.2945))
-    with ElevationDataManager(None) as mgr:
-        assert elevation == mgr.query_elevation(48.8584, 2.2945)
+    with ElevationOnlineManager() as mgr:
+        assert elevation == mgr.elevation(48.8584, 2.2945)
 
     tif_path = tmp_path / "dem_test.tif"
     create_tif_from_single_elevation(tif_path, 48.8584, 2.2945, elevation)
     with ElevationDataManager([str(tif_path)]) as mgr:
-        assert mgr.query_elevation(48.8584, 2.2945) == elevation
+        assert mgr.elevation(48.8584, 2.2945) == elevation
 
     tif_path2 = tmp_path / "dem_test2.tif"
     create_tif_from_single_elevation(tif_path2, 51.5074, -0.1278, 125.0)
     with ElevationDataManager([str(tif_path), str(tif_path2)], verbose=True) as mgr:
-        assert mgr.query_elevation(48.8584, 2.2945) == elevation
-        assert mgr.query_elevation(51.5074, -0.1278) == 125.0
+        assert mgr.elevation(48.8584, 2.2945) == elevation
+        assert mgr.elevation(51.5074, -0.1278) == 125.0
 
 
 def test_query_archive_zip(tmp_path):
@@ -155,11 +160,11 @@ def test_query_archive_zip(tmp_path):
         zf.write(tmp_path / "north.tif", "north.tif")
         zf.write(tmp_path / "south.tif", "tmp/south.tif")
     with ElevationDataManager([str(zip_path)]) as mgr:
-        assert mgr.query_elevation(48.8584, 2.2945) == 175.0
-        assert mgr.query_elevation(51.5074, -0.1278) == 124.0
+        assert mgr.elevation(48.8584, 2.2945) == 175.0
+        assert mgr.elevation(51.5074, -0.1278) == 124.0
     with ElevationDataManager([str(zip_path)], extract=True) as mgr:
-        assert mgr.query_elevation(48.8584, 2.2945) == 175.0
-        assert mgr.query_elevation(51.5074, -0.1278) == 124.0
+        assert mgr.elevation(48.8584, 2.2945) == 175.0
+        assert mgr.elevation(51.5074, -0.1278) == 124.0
 
 
 def test_query_archive_tar(tmp_path):
@@ -171,11 +176,11 @@ def test_query_archive_tar(tmp_path):
         tf.add(tmp_path / "east.tif", "east.tif")
         tf.add(tmp_path / "west.tif", "tmp/west.tif")
     with ElevationDataManager([str(tar_path)]) as mgr:
-        assert mgr.query_elevation(40.7128, -74.0060) == 10.0
-        assert mgr.query_elevation(35.6762, 139.6503) == 40.0
+        assert mgr.elevation(40.7128, -74.0060) == 10.0
+        assert mgr.elevation(35.6762, 139.6503) == 40.0
     with ElevationDataManager([str(tar_path)], extract=True) as mgr:
-        assert mgr.query_elevation(40.7128, -74.0060) == 10.0
-        assert mgr.query_elevation(35.6762, 139.6503) == 40.0
+        assert mgr.elevation(40.7128, -74.0060) == 10.0
+        assert mgr.elevation(35.6762, 139.6503) == 40.0
 
 
 def test_interpolate_elevations(tmp_path):
@@ -201,9 +206,9 @@ def test_interpolate_elevations(tmp_path):
     )
 
     with ElevationDataManager([str(tif_path), str(tif_path)]) as mgr:
-        assert mgr.query_elevation(south + 1e-4, west + 1e-4) > elevations[2, 0]
-        assert mgr.query_elevation(north - 1e-4, west + 1e-4) < elevations[0, 0]
-        assert mgr.query_elevation(north - 1e-4, east - 1e-4) < elevations[0, 2]
+        assert mgr.elevation(south + 1e-4, west + 1e-4) > elevations[2, 0]
+        assert mgr.elevation(north - 1e-4, west + 1e-4) < elevations[0, 0]
+        assert mgr.elevation(north - 1e-4, east - 1e-4) < elevations[0, 2]
         for i in range(3):
             for j in range(3):
                 for k in range(max(i - 1, 0), min(i + 2, 3)):
@@ -212,11 +217,11 @@ def test_interpolate_elevations(tmp_path):
                         lon = (points[i, j, 1] + points[k, l, 1]) * 0.5
                         if abs(i - k) + abs(j - l) < 2:
                             ele = (elevations[i, j] + elevations[k, l]) * 0.5
-                            assert abs(mgr.query_elevation(lat, lon) - ele) <= 0.1
+                            assert abs(mgr.elevation(lat, lon) - ele) <= 0.1
                         else:
                             emax = max(elevations[i, j], elevations[k, l])
                             emin = min(elevations[i, j], elevations[k, l])
-                            assert emin < mgr.query_elevation(lat, lon) < emax
+                            assert emin < mgr.elevation(lat, lon) < emax
 
 
 def test_gpx_class_parse(tmp_path):

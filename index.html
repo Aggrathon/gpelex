@@ -64,8 +64,33 @@
             input[type="file"]::file-selector-button:hover {
                 background-color: var(--button-hover-color);
             }
+            button:disabled {
+                background-color: var(--background-color);
+                cursor: not-allowed;
+            }
             .error {
                 color: var(--error-color);
+            }
+            .spinner-container {
+                display: inline-flex;
+                align-items: center;
+            }
+            .spinner {
+                width: 16px;
+                height: 16px;
+                border: 2px solid var(--primary-color);
+                border-top-color: transparent;
+                border-radius: 50%;
+                animation: spin 0.8s linear infinite;
+                margin-right: 8px;
+            }
+            @keyframes spin {
+                to {
+                    transform: rotate(360deg);
+                }
+            }
+            .spinner-hidden {
+                display: none;
             }
             .footnote {
                 color: var(--secondary-color);
@@ -95,13 +120,19 @@
                 </label>
                 <label>
                     Select Elevation Maps<sup>*</sup>:<br />
-                    <input type="file" id="demFiles" accept=".tif,.hgt,.zip" multiple />
+                    <input
+                        type="file"
+                        id="demFiles"
+                        accept=".tif,.tar,tar.gz,.zip"
+                        multiple
+                    />
                 </label>
                 <label>
                     <input type="checkbox" id="forceOverwrite" />
                     Force overwrite existing elevation data
                 </label>
-                <button id="runButton" style="display: none">
+                <button id="runButton" disabled class="spinner-container">
+                    <span id="spinner" class="spinner"></span>
                     Add elevation<sup>**</sup>
                 </button>
             </div>
@@ -120,98 +151,107 @@
             <div id="output"></div>
             <br />
             <div id="downloadSection" class="border" style="display: none">
-                Download Processed Files:
+                Download processed files:
             </div>
         </div>
         <script type="text/javascript">
-            async function main() {
-                try {
-                    let pyodide = await loadPyodide();
-                    await pyodide.loadPackage(["gpxpy", "rasterio"]);
-                    // Fetch the gpelex.py script
-                    const response = await fetch("gpelex.py");
-                    const scriptContent = await response.text();
-                    pyodide.FS.writeFile("gpelex.py", scriptContent);
-                } catch (error) {
-                    const err = document.createElement("div");
-                    err.className = "error";
-                    err.innerHTML = error;
-                    document.getElementById("output").appendChild(err);
-                }
+            function showError(message) {
+                const err = document.createElement("div");
+                err.className = "error";
+                err.innerHTML = message.replace(/\n/g, "<br>");
+                document.getElementById("output").appendChild(err);
+            }
+            function showMessage(message) {
+                const err = document.createElement("div");
+                err.innerHTML = message;
+                document.getElementById("output").appendChild(err);
+            }
 
-                // Set up the run button
+            async function main() {
                 const runButton = document.getElementById("runButton");
                 const gpxFilesInput = document.getElementById("gpxFiles");
                 const demFilesInput = document.getElementById("demFiles");
                 const downloadSection = document.getElementById("downloadSection");
+
+                runButton.disabled = true;
+                document.getElementById("spinner").classList.remove("spinner-hidden");
+
+                let pyodide;
+                try {
+                    pyodide = await loadPyodide();
+                    await pyodide.loadPackage(["numpy", "scipy", "rasterio"]);
+                    const response = await fetch("gpelex.py");
+                    const scriptContent = await response.text();
+                    pyodide.FS.writeFile("gpelex.py", scriptContent);
+                    await pyodide.runPythonAsync("import gpelex");
+                } catch (error) {
+                    showError(error);
+                    document.getElementById("spinner").classList.add("spinner-hidden");
+                    return;
+                }
+
                 runButton.addEventListener("click", async () => {
                     if (gpxFilesInput.files.length === 0) {
-                        document.getElementById("output").innerHTML =
-                            "Please select at least one GPX file.";
+                        showMessage("Please select at least one GPX file.");
                         return;
                     }
                     if (demFilesInput.files.length === 0) {
-                        document.getElementById("output").innerHTML =
-                            "Please select at least one elevation file.";
+                        showMessage("Please select at least one elevation file.");
                         return;
                     }
+                    runButton.disabled = true;
+                    document.getElementById("spinner").classList.remove("spinner-hidden");
 
-                    // Write the DEM files to Pyodide's virtual file system
                     var demFileNames = "[";
                     for (const demFile of demFilesInput.files) {
                         const demContent = await demFile.arrayBuffer();
                         pyodide.FS.writeFile(demFile.name, new Uint8Array(demContent));
-                        demFileNames += demFile.name + ",";
+                        demFileNames += "'" + demFile.name + "',";
                     }
                     demFileNames += "]";
 
                     for (const gpxFile of gpxFilesInput.files) {
-                        // Write the GPX file to Pyodide's virtual file system
                         const gpxContent = await gpxFile.text();
                         pyodide.FS.writeFile(gpxFile.name, gpxContent);
 
-                        // Run the script with the selected files
                         try {
-                            const gpxFileName = gpxFile.name;
-                            const index = gpxFileName.lastIndexOf(".");
-                            const outputFileName =
-                                gpxFileName.substring(0, index) +
-                                "_with_elevation" +
-                                gpxFileName.substring(index);
-
                             const forceOverwrite =
                                 document.getElementById("forceOverwrite").checked;
-                            await pyodide.runPythonAsync(`
-                                    import gpelex
-                                    gpelex.add_elevation_to_gpx("${gpxFileName}", ${demFileNames}, "${outputFileName}", ${forceOverwrite})
-                                `);
-                            // Read the processed GPX file from Pyodide's virtual file system
-                            const processedGpxContent = pyodide.FS.readFile(
-                                outputFileName,
-                                { encoding: "utf8" },
+                            const outputFileName = await pyodide.runPythonAsync(
+                                `gpelex.add_elevation_to_gpx("${gpxFile.name}", ${demFileNames}, None, ${forceOverwrite ? "True" : "False"}, True)`,
                             );
 
                             // Create a download link for the processed GPX file
-                            const processedGpxBlob = new Blob([processedGpxContent], {
+                            const newGpxContent = pyodide.FS.readFile(outputFileName, {
+                                encoding: "utf8",
+                            });
+                            const newGpxBlob = new Blob([newGpxContent], {
                                 type: "application/gpx+xml",
                             });
-                            const processedGpxUrl = URL.createObjectURL(processedGpxBlob);
+                            const processedGpxUrl = URL.createObjectURL(newGpxBlob);
                             const downloadLink = document.createElement("a");
                             downloadLink.href = processedGpxUrl;
                             downloadLink.download = outputFileName;
-                            downloadLink.textContent = "Download " + outputFileName;
+                            downloadLink.textContent = outputFileName;
                             downloadSection.appendChild(document.createElement("br"));
                             downloadSection.appendChild(downloadLink);
+                            if (gpxFile.name == outputFileName) {
+                                downloadSection.append(" (No change)");
+                            }
                             downloadSection.style.display = "block";
                         } catch (error) {
-                            const err = document.createElement("div");
-                            err.className = "error";
-                            err.innerHTML = `Error processing ${gpxFile.name}: ${error}`;
-                            document.getElementById("output").appendChild(err);
+                            showError(
+                                `Error processing ${gpxFile.name}: ${error.message}`,
+                            );
+                            throw error;
                         }
                     }
+                    document.getElementById("spinner").classList.add("spinner-hidden");
+                    runButton.disabled = false;
                 });
-                runButton.style.display = "block";
+
+                document.getElementById("spinner").classList.add("spinner-hidden");
+                runButton.disabled = false;
             }
             main();
         </script>

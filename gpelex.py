@@ -21,6 +21,7 @@ Arguments:
 """
 
 import argparse
+import logging
 import os
 import tarfile
 import tempfile
@@ -30,12 +31,14 @@ from typing import Iterator
 
 import numpy as np
 import rasterio
+from rasterio.crs import CRS
 from rasterio.transform import rowcol
+from rasterio.warp import transform
 from rasterio.windows import Window
 from scipy.interpolate import interpn
 
 
-def open_dem_files(paths: list[str], extract_archives: bool = False) -> list:
+def open_dem_files(paths: list[str], extract: bool = False) -> list:
     """Open DEM files, expanding archives and extracting archive items if needed."""
     dem_files = []
     geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat")
@@ -51,7 +54,7 @@ def open_dem_files(paths: list[str], extract_archives: bool = False) -> list:
                 items = [
                     item for item in archive.namelist() if item.endswith(geospatial_ext)
                 ]
-                if extract_archives and items:
+                if extract and items:
                     with tempfile.TemporaryDirectory() as tmpdir:
                         for item in items:
                             dem_file = rasterio.open(archive.extract(item, tmpdir))
@@ -69,13 +72,13 @@ def open_dem_files(paths: list[str], extract_archives: bool = False) -> list:
                 items = [
                     item for item in archive.getnames() if item.endswith(geospatial_ext)
                 ]
-                if extract_archives and items:
+                if extract and items:
                     with tempfile.TemporaryDirectory() as tmpdir:
                         for item in items:
                             archive.extract(item, tmpdir, filter="data")
                             dem_file = rasterio.open(os.path.join(tmpdir, item))
                             dem_files.append(dem_file)
-                elif not extract_archives:
+                elif not extract:
                     for item in items:
                         dem_file = rasterio.open(f"tar+file://{path}!{item}")
                         dem_files.append(dem_file)
@@ -147,22 +150,35 @@ class ElevationDataManager:
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
                 Supports both regular files and zip/tar archives with multiple files.
                 Also supports archive:// URLs (e.g., zip:///path/to/file.zip!dataset.tif).
-        extract_archives: If True, force extract archive contents before processing (on platforms where archive:// URLs are not working).
+        extract: If True, force extract archive contents before processing (on platforms where archive:// URLs are not working).
+        verbose: If True, print information about the data source.
     """
 
-    def __init__(self, dem_paths: list[str] | None, extract_archives: bool = False):
+    def __init__(
+        self, dem_paths: list[str] | None, extract: bool = False, verbose: bool = False
+    ):
         self.dem_paths = dem_paths
         self.dem_files = []
         self.elevation_data = None
-        self.extract_archives = extract_archives
+        self.extract = extract
+        self.verbose = verbose
+        self.crs = CRS.from_epsg(4326)
 
     def __enter__(self):
         if self.dem_paths is not None:
-            self.dem_files = open_dem_files(self.dem_paths, self.extract_archives)
+            self.dem_files = open_dem_files(self.dem_paths, self.extract)
+            if self.verbose and self.dem_files:
+                logging.info("Using DEM files:")
+                for dem_file in self.dem_files:
+                    logging.info(
+                        f"  - {dem_file.name}: {dem_file.lnglat()} {dem_file.crs}"
+                    )
         else:
             import srtm
 
             self.elevation_data = srtm.get_data()
+            if self.verbose:
+                logging.info("Using online SRTM (30m) data")
         return self
 
     def query_elevation(self, latitude: float, longitude: float) -> float | None:
@@ -195,9 +211,10 @@ class ElevationDataManager:
     ) -> float | None:
         """Interpolate elevation using the 3 closest DEM pixels."""
         height, width = dem_file.shape
-        row, col = rowcol(dem_file.transform, longitude, latitude)
+        lon, lat = transform(self.crs, dem_file.crs, [longitude], [latitude])
+        row, col = rowcol(dem_file.transform, lon[0], lat[0])
         if 0 <= row < height and 0 <= col < width:
-            x, y = rowcol(dem_file.transform, longitude, latitude, op=lambda v: v)
+            x, y = rowcol(dem_file.transform, lon[0], lat[0], op=lambda v: v)
             rows = (max(row - 1, 0), min(row + 2, height))
             cols = (max(col - 1, 0), min(col + 2, width))
             dem = dem_file.read(1, window=Window.from_slices(rows, cols))
@@ -220,47 +237,74 @@ class ElevationDataManager:
 
 
 def add_elevation_to_gpx(
-    input_gpx_path: str,
+    input_path: str,
     dem_paths: list[str] | None,
-    output_gpx_path: str | None = None,
-    force_overwrite: bool = False,
-    extract_archives: bool = False,
+    output_path: str | None = None,
+    overwrite: bool = False,
+    extract: bool = False,
+    verbose: int = 0,
 ) -> str:
     """Add elevation data to a GPX file using DEM files or the SRTM API.
 
     Args:
-        input_gpx_path: Path to the input GPX file.
+        input_path: Path to the input GPX file.
         dem_paths: List of paths to DEM files. If None, the SRTM API will be used.
-        output_gpx_path: Path to the output GPX file. If None, a default name is generated.
-        force_overwrite: If True, overwrite existing elevation data.
-        extract_archives: If True, (force) extract archive contents before processing.
+        output_path: Path to the output GPX file. If None, a default name is generated.
+        overwrite: If True, overwrite existing elevation data.
+        extract: If True, (force) extract archive contents before processing.
+        verbose: Verbose level (1: summary info including data source, 2: per-point details).
 
     Returns:
         The path to the output GPX file.
     """
 
-    if output_gpx_path is None:
-        output_gpx_path = f"{os.path.splitext(input_gpx_path)[0]}_with_elevation.gpx"
+    if output_path is None:
+        output_path = f"{os.path.splitext(input_path)[0]}_with_elevation.gpx"
 
-    gpx = GPX(input_gpx_path)
-    elevation_was_added = False
+    gpx = GPX(input_path)
+    point_updates = 0
+
+    if verbose >= 1:
+        logging.info(f"Loading GPX file: {input_path}")
+
     with ElevationDataManager(
-        dem_paths if dem_paths else None, extract_archives
+        dem_paths if dem_paths else None, extract, verbose >= 1
     ) as elevation:
+        point_count = 0
         for point in gpx.points():
-            if force_overwrite or point.elevation is None:
+            point_count += 1
+            if overwrite or point.elevation is None:
+                if verbose >= 2:
+                    logging.info(
+                        f"Querying elevation at lat={point.latitude}, lon={point.longitude}, ele={point.elevation}"
+                    )
                 value = elevation.query_elevation(point.latitude, point.longitude)
                 if value is not None:
                     point.elevation = value
-                    elevation_was_added = True
+                    point_updates += 1
+                    if verbose >= 2:
+                        logging.info(f"Elevation set to: {value}m")
 
-    if elevation_was_added:
-        gpx.write(output_gpx_path)
-        return output_gpx_path
-    return input_gpx_path
+        if verbose >= 1:
+            logging.info(f"Processed {point_count} points, {point_updates} updated")
+
+    if point_updates:
+        gpx.write(output_path)
+        if verbose >= 2:
+            logging.info(f"GPX file saved to: {output_path}")
+        return output_path
+
+    if verbose >= 1:
+        logging.info(f"No changes made to: {input_path}")
+    return input_path
 
 
 def main():
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(levelname)s: %(message)s",
+    )
+
     parser = argparse.ArgumentParser(
         description="Add elevation data to a GPX file using one or more DEM files or the elevation library."
     )
@@ -295,17 +339,35 @@ def main():
         "--extract-archives",
         "-e",
         action="store_true",
-        help="Extract archive contents before processing (only needed for special file systems).",
+        help="Extract archive contents before processing (only needed for special file systems)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Enable verbose output (use -vv for more details per point)",
     )
 
     args = parser.parse_args()
+
+    if args.verbose > 0:
+        logging.getLogger().setLevel(logging.INFO)
+        logging.info(
+            "Verbose mode enabled"
+            if args.verbose == 1
+            else "Verbose mode (per-point) enabled"
+        )
+
     output = add_elevation_to_gpx(
-        args.INPUT, args.dem, args.output, args.force, args.extract_archives
+        args.INPUT,
+        args.dem,
+        args.output,
+        args.force,
+        args.extract_archives,
+        verbose=args.verbose,
     )
-    if output == args.INPUT:
-        print(f"No changes made to: {output}")
-    else:
-        print(f"GPX file saved successfully to: {output}")
+    print(output)
 
 
 if __name__ == "__main__":

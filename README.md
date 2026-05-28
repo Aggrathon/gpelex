@@ -1,6 +1,6 @@
 # GPeleX: Add elevation data to GPX files
 
-> [Run it in you browser here!](index.html)
+> [Run it in your browser here!](https://aggrathon.github.io/gpelex)
 
 Add elevation data to GPX trackpoints using local DEM (Digital Elevation Maps) files or [online SRTM](https://github.com/tkrajina/srtm.py) (Shuttle Radar Topography Mission) elevation data.
 
@@ -22,7 +22,7 @@ uv run gpelex.py input.gpx --dem elevation.tif --output output.gpx
 ```
 Or without manually downloading:
 ```bash
-uv run https://raw.githubusercontent.com/...todo --help
+uv run https://raw.githubusercontent.com/Aggrathon/gpelex/main/gpelex.py --help
 ```
 
 Alternatively, create a Python (>=3.11) environment with [`rasterio`](https://rasterio.readthedocs.io) and [`scipy`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.interpn.html) for local DEM files or [`srtm.py`](https://github.com/tkrajina/srtm.py) for online SRTM data.
@@ -41,7 +41,9 @@ If no `--dem` files are provided, the tool fetches elevation from the [SRTM API]
 
 ### Browser
 
-Open `index.html` in a browser. Select a GPX file and one or more elevation map files (`.tif`, `.zip`, `.tar.gz`), then click **Add elevation**. All processing runs locally via [Pyodide](https://pyodide.org) — nothing is uploaded.
+Open [https://aggrathon.github.io/gpelex](https://aggrathon.github.io/gpelex) in a browser. Select a GPX file and one or more elevation map files (`.tif`, `.zip`, `.tar.gz`), then click **Add elevation** (after [Pyodide](https://pyodide.org) has loaded all dependencies). All processing runs locally in your browser — nothing is uploaded.
+
+Alternatively, download [gpelex.py](gpelex.py) and [index.html](index.html) and serve it yourself (requires at least a basic server such as `uvx python -m http.server` since bare html files are not allowed to read local files).
 
 ## Testing
 

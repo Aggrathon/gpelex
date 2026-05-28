@@ -179,11 +179,11 @@
                 let pyodide;
                 try {
                     pyodide = await loadPyodide();
-                    await pyodide.loadPackage(["numpy", "scipy", "rasterio"]);
+                    await pyodide.loadPackage(["scipy", "rasterio"]);
                     const response = await fetch("gpelex.py");
                     const scriptContent = await response.text();
                     pyodide.FS.writeFile("gpelex.py", scriptContent);
-                    await pyodide.runPythonAsync("import gpelex");
+                    await pyodide.runPythonAsync("import gpelex, rasterio, scipy");
                 } catch (error) {
                     showError(error);
                     document.getElementById("spinner").classList.add("spinner-hidden");

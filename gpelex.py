@@ -3,7 +3,6 @@
 # dependencies = [
 #   "rasterio",
 #   "srtm.py",
-#   "numpy",
 #   "scipy"
 # ]
 # ///
@@ -29,14 +28,6 @@ import xml.etree.ElementTree as ET
 import zipfile
 from typing import Iterator
 
-import numpy as np
-import rasterio
-from rasterio.crs import CRS
-from rasterio.transform import rowcol
-from rasterio.warp import transform
-from rasterio.windows import Window
-from scipy.interpolate import interpn
-
 
 def open_dem_files(paths: list[str], extract: bool = False) -> list:
     """Open DEM files, expanding archives and extracting archive items if needed.
@@ -54,6 +45,7 @@ def open_dem_files(paths: list[str], extract: bool = False) -> list:
     """
     dem_files = []
     geospatial_ext = (".tif", ".tiff", ".img", ".jp2", ".ras", ".dat", ".hgt")
+    import rasterio
 
     for path in paths:
         if path.endswith(geospatial_ext):
@@ -167,6 +159,8 @@ class ElevationDataManager:
     """
 
     def __init__(self, dem_paths: list[str], extract: bool = False, verbose: int = 0):
+        from rasterio.crs import CRS
+
         self.dem_paths = dem_paths
         self.dem_files = []
         self.extract = extract
@@ -199,9 +193,12 @@ class ElevationDataManager:
         Returns:
             Elevation in meters, or None if unavailable.
         """
-        for dem_file in self.dem_files:
+        from rasterio.transform import rowcol
+        from rasterio.warp import transform
+        from rasterio.windows import Window
+
+        for i, dem_file in enumerate(self.dem_files):
             height, width = dem_file.shape
-            elevation = None
             lon, lat = transform(self.crs, dem_file.crs, [longitude], [latitude])
             row, col = rowcol(dem_file.transform, lon[0], lat[0])
             if 0 <= row < height and 0 <= col < width:
@@ -209,19 +206,25 @@ class ElevationDataManager:
                 rows = (max(row - 1, 0), min(row + 2, height))
                 cols = (max(col - 1, 0), min(col + 2, width))
                 dem = dem_file.read(1, window=Window.from_slices(rows, cols))
-                if dem.size == 1:
-                    elevation = float(dem[0, 0])
-                elif dem.size:
+                if dem.size:
+                    if i > 0:  # The next point is probably in the same file
+                        self.dem_files[i] = self.dem_files[1]
+                        self.dem_files[1] = self.dem_files[0]
+                        self.dem_files[0] = dem_file
+                    if dem.size == 1:
+                        return float(dem[0, 0])
+
+                    from scipy.interpolate import interpn
+
                     elevation = interpn(
-                        (np.arange(*rows), np.arange(*cols)),
+                        (range(*rows), range(*cols)),
                         dem[..., None],
                         [[x - 0.5, y - 0.5]],
                         method="slinear",
                         bounds_error=False,
                         fill_value=None,
                     )[0, 0]
-            if elevation is not None:
-                return float(elevation)
+                    return float(elevation)
         return None
 
     def __exit__(self, exc_type, exc_val, exc_tb):

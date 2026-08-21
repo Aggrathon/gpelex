@@ -1,8 +1,10 @@
 # GPeleX: Add elevation data to GPX files
 
-> [Run it in your browser here!](https://aggrathon.github.io/gpelex)
+> This project has been superseded by [GPhiX](https://github.com/Aggrathon/gphix), which also includes fixing missing elevation functionality.  
 
 Add elevation data to GPX trackpoints using local DEM (Digital Elevation Maps) files or [online SRTM](https://github.com/tkrajina/srtm.py) (Shuttle Radar Topography Mission) elevation data.
+
+> [Run it in your browser here!](https://aggrathon.github.io/gpelex)
 
 Useful for GPX tracks and routes that are missing elevation, e.g., as exported by some sport watches.
 The added elevation (approximately) follows the ground level.
